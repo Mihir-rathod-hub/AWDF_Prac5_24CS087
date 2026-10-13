@@ -1,4 +1,6 @@
+require('dotenv').config();
 const express = require('express');
+const connectDB = require('./config/db');
 const logger = require('./middleware/logger');
 const errorHandler = require('./middleware/errorHandler');
 const taskRoutes = require('./routes/taskRoutes');
@@ -30,7 +32,7 @@ app.use(express.json());
 app.get('/', (req, res) => {
   return res.status(200).json({
     success: true,
-    message: 'Task Management RESTful API is running.',
+    message: 'Task Management RESTful API with MongoDB and Mongoose is running.',
     endpoints: {
       getAllTasks: 'GET /tasks',
       getTaskById: 'GET /tasks/:id',
@@ -55,10 +57,21 @@ app.use((req, res, next) => {
 // 6. Global Error Handling Middleware (must be registered last)
 app.use(errorHandler);
 
-// Start HTTP server
-const server = app.listen(PORT, () => {
-  console.log(`Task Management API server running on port ${PORT}`);
-  console.log(`Access the API at http://localhost:${PORT}/tasks`);
-});
+// Start server only after database connection succeeds
+const startServer = async () => {
+  try {
+    await connectDB();
+    const server = app.listen(PORT, () => {
+      console.log(`Task Management API server running on port ${PORT}`);
+      console.log(`Access the API at http://localhost:${PORT}/tasks`);
+    });
+    return server;
+  } catch (error) {
+    console.error('Failed to start server due to database connection error:', error.message);
+    process.exit(1);
+  }
+};
+
+startServer();
 
 module.exports = app;

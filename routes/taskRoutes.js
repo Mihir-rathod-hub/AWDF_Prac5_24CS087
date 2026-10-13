@@ -1,206 +1,272 @@
 const express = require('express');
+const mongoose = require('mongoose');
+const Task = require('../models/Task');
+
 const router = express.Router();
 
 /**
- * In-memory task storage.
- * Initialized with a default task as specified in Practical 4 requirements.
+ * Validate MongoDB ObjectId format (24-character hexadecimal string)
  */
-let tasks = [
-  { id: 1, title: 'Learn Node.js', completed: false }
-];
-
-/**
- * Auto-incrementing identifier counter to ensure IDs are unique
- * and never reused even after task deletion.
- */
-let nextId = 2;
-
-/**
- * Helper function to validate and parse task IDs from URL parameters.
- * Returns the parsed integer if valid, or null if invalid.
- */
-function parseAndValidateId(idParam) {
-  if (!idParam || !/^\d+$/.test(idParam.trim())) {
-    return null;
-  }
-  const id = parseInt(idParam.trim(), 10);
-  if (id <= 0 || !Number.isSafeInteger(id)) {
-    return null;
-  }
-  return id;
+function isValidObjectId(id) {
+  return typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id.trim());
 }
 
 /**
  * GET /tasks
- * Return all tasks.
+ * Retrieve all tasks from MongoDB
  */
-router.get('/', (req, res) => {
-  return res.status(200).json({
-    success: true,
-    count: tasks.length,
-    data: tasks
-  });
+router.get('/', async (req, res, next) => {
+  try {
+    const tasks = await Task.find().sort({ createdAt: -1 });
+    return res.status(200).json({
+      success: true,
+      count: tasks.length,
+      data: tasks
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**
  * GET /tasks/:id
- * Return a specific task by its unique ID.
+ * Retrieve a specific task by its MongoDB ObjectId
  */
-router.get('/:id', (req, res) => {
-  const id = parseAndValidateId(req.params.id);
-  if (id === null) {
-    return res.status(400).json({
-      success: false,
-      message: 'Invalid task ID. ID must be a positive integer.'
-    });
-  }
+router.get('/:id', async (req, res, next) => {
+  try {
+    const id = req.params.id;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid task ID format: '${id}'. Must be a 24-character hexadecimal ObjectId.`
+      });
+    }
 
-  const task = tasks.find((t) => t.id === id);
-  if (!task) {
-    return res.status(404).json({
-      success: false,
-      message: `Task with ID ${id} not found.`
-    });
-  }
+    const task = await Task.findById(id);
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: `Task with ID '${id}' not found.`
+      });
+    }
 
-  return res.status(200).json({
-    success: true,
-    data: task
-  });
+    return res.status(200).json({
+      success: true,
+      data: task
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**
  * POST /tasks
- * Create a new task.
+ * Create a new task in MongoDB using Task.create()
+ * Applies schema defaults for omitted fields
  */
-router.post('/', (req, res) => {
-  const { title, completed } = req.body || {};
+router.post('/', async (req, res, next) => {
+  try {
+    const { title, description, completed, priority } = req.body || {};
 
-  // Validate title: required, must be string, cannot be empty or whitespace only
-  if (title === undefined || typeof title !== 'string' || title.trim().length === 0) {
-    return res.status(400).json({
-      success: false,
-      message: 'Title is required and must be a non-empty string.'
+    // Validate title presence and type
+    if (title === undefined || typeof title !== 'string' || title.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed.',
+        errors: {
+          title: 'Title is required and cannot be empty or contain only whitespace.'
+        }
+      });
+    }
+
+    const taskPayload = {
+      title: title.trim()
+    };
+
+    if (description !== undefined) {
+      if (typeof description !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed.',
+          errors: {
+            description: 'Description must be a string.'
+          }
+        });
+      }
+      taskPayload.description = description.trim();
+    }
+
+    if (completed !== undefined) {
+      if (typeof completed !== 'boolean') {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed.',
+          errors: {
+            completed: 'Completed must be a boolean (true or false).'
+          }
+        });
+      }
+      taskPayload.completed = completed;
+    }
+
+    if (priority !== undefined) {
+      if (typeof priority !== 'string' || !['low', 'medium', 'high'].includes(priority.toLowerCase().trim())) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed.',
+          errors: {
+            priority: `'${priority}' is not a valid priority. Allowed values: low, medium, high.`
+          }
+        });
+      }
+      taskPayload.priority = priority.toLowerCase().trim();
+    }
+
+    const newTask = await Task.create(taskPayload);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Task created successfully.',
+      data: newTask
     });
+  } catch (error) {
+    next(error);
   }
-
-  // Validate completed: optional, but if provided must be boolean
-  if (completed !== undefined && typeof completed !== 'boolean') {
-    return res.status(400).json({
-      success: false,
-      message: 'Completed status must be a boolean (true or false).'
-    });
-  }
-
-  const newTask = {
-    id: nextId++,
-    title: title.trim(),
-    completed: completed === true
-  };
-
-  tasks.push(newTask);
-
-  return res.status(201).json({
-    success: true,
-    message: 'Task created successfully.',
-    data: newTask
-  });
 });
 
 /**
  * PUT /tasks/:id
- * Update an existing task.
+ * Update an existing task using Task.findByIdAndUpdate with { new: true, runValidators: true }
  */
-router.put('/:id', (req, res) => {
-  const id = parseAndValidateId(req.params.id);
-  if (id === null) {
-    return res.status(400).json({
-      success: false,
-      message: 'Invalid task ID. ID must be a positive integer.'
-    });
-  }
-
-  const taskIndex = tasks.findIndex((t) => t.id === id);
-  if (taskIndex === -1) {
-    return res.status(404).json({
-      success: false,
-      message: `Task with ID ${id} not found.`
-    });
-  }
-
-  const { title, completed } = req.body || {};
-
-  // Check that at least one field to update is provided
-  if (title === undefined && completed === undefined) {
-    return res.status(400).json({
-      success: false,
-      message: "At least one field ('title' or 'completed') must be provided to update."
-    });
-  }
-
-  // Validate title if provided
-  if (title !== undefined) {
-    if (typeof title !== 'string' || title.trim().length === 0) {
+router.put('/:id', async (req, res, next) => {
+  try {
+    const id = req.params.id;
+    if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
-        message: 'Title must be a non-empty string.'
+        message: `Invalid task ID format: '${id}'. Must be a 24-character hexadecimal ObjectId.`
       });
     }
-  }
 
-  // Validate completed if provided
-  if (completed !== undefined) {
-    if (typeof completed !== 'boolean') {
+    const { title, description, completed, priority } = req.body || {};
+
+    // Ensure at least one update field is provided
+    if (title === undefined && description === undefined && completed === undefined && priority === undefined) {
       return res.status(400).json({
         success: false,
-        message: 'Completed status must be a boolean (true or false).'
+        message: "At least one field ('title', 'description', 'completed', 'priority') must be provided to update."
       });
     }
-  }
 
-  // Apply updates
-  if (title !== undefined) {
-    tasks[taskIndex].title = title.trim();
-  }
-  if (completed !== undefined) {
-    tasks[taskIndex].completed = completed;
-  }
+    const updatePayload = {};
 
-  return res.status(200).json({
-    success: true,
-    message: 'Task updated successfully.',
-    data: tasks[taskIndex]
-  });
+    if (title !== undefined) {
+      if (typeof title !== 'string' || title.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed.',
+          errors: {
+            title: 'Title cannot be empty or contain only whitespace.'
+          }
+        });
+      }
+      updatePayload.title = title.trim();
+    }
+
+    if (description !== undefined) {
+      if (typeof description !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed.',
+          errors: {
+            description: 'Description must be a string.'
+          }
+        });
+      }
+      updatePayload.description = description.trim();
+    }
+
+    if (completed !== undefined) {
+      if (typeof completed !== 'boolean') {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed.',
+          errors: {
+            completed: 'Completed must be a boolean (true or false).'
+          }
+        });
+      }
+      updatePayload.completed = completed;
+    }
+
+    if (priority !== undefined) {
+      if (typeof priority !== 'string' || !['low', 'medium', 'high'].includes(priority.toLowerCase().trim())) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed.',
+          errors: {
+            priority: `'${priority}' is not a valid priority. Allowed values: low, medium, high.`
+          }
+        });
+      }
+      updatePayload.priority = priority.toLowerCase().trim();
+    }
+
+    const updatedTask = await Task.findByIdAndUpdate(
+      id,
+      updatePayload,
+      { new: true, returnDocument: 'after', runValidators: true }
+    );
+
+
+    if (!updatedTask) {
+      return res.status(404).json({
+        success: false,
+        message: `Task with ID '${id}' not found.`
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Task updated successfully.',
+      data: updatedTask
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**
  * DELETE /tasks/:id
- * Delete an existing task.
+ * Delete an existing task using Task.findByIdAndDelete()
  */
-router.delete('/:id', (req, res) => {
-  const id = parseAndValidateId(req.params.id);
-  if (id === null) {
-    return res.status(400).json({
-      success: false,
-      message: 'Invalid task ID. ID must be a positive integer.'
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const id = req.params.id;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid task ID format: '${id}'. Must be a 24-character hexadecimal ObjectId.`
+      });
+    }
+
+    const deletedTask = await Task.findByIdAndDelete(id);
+
+    if (!deletedTask) {
+      return res.status(404).json({
+        success: false,
+        message: `Task with ID '${id}' not found.`
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Task deleted successfully.',
+      data: deletedTask
     });
+  } catch (error) {
+    next(error);
   }
-
-  const taskIndex = tasks.findIndex((t) => t.id === id);
-  if (taskIndex === -1) {
-    return res.status(404).json({
-      success: false,
-      message: `Task with ID ${id} not found.`
-    });
-  }
-
-  const [deletedTask] = tasks.splice(taskIndex, 1);
-
-  return res.status(200).json({
-    success: true,
-    message: 'Task deleted successfully.',
-    data: deletedTask
-  });
 });
 
 module.exports = router;
